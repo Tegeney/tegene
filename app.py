@@ -71,34 +71,59 @@ def save_answer_keys(keys: Dict) -> bool:
         return False
 
 def detect_subject_areas(image: np.ndarray) -> Optional[Dict[str, Tuple[int, int, int, int]]]:
-    """Detect subject areas using color detection"""
+    """Detect subject areas using color detection with fallback to contour-based detection"""
     try:
-        # Convert to HSV color space
+        # Preprocess image for better detection
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Convert to HSV color space for color-based detection
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Define color ranges for subject areas
+        # Define color ranges for subject areas (expanded for robustness)
         color_ranges = {
             'subject1': {
-                'lower': np.array([0, 100, 100]),  # Red range
-                'upper': np.array([10, 255, 255])
+                'lower': np.array([0, 80, 80]),  # Wider red range
+                'upper': np.array([20, 255, 255])
             },
             'subject2': {
-                'lower': np.array([100, 100, 100]),  # Blue range
-                'upper': np.array([140, 255, 255])
+                'lower': np.array([90, 80, 80]),  # Wider blue range
+                'upper': np.array([150, 255, 255])
             }
         }
         
         subject_areas = {}
         
+        # Try color-based detection
         for subject, colors in color_ranges.items():
             mask = cv2.inRange(hsv, colors['lower'], colors['upper'])
+            mask = cv2.dilate(mask, None, iterations=2)  # Dilate to close small gaps
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             if contours:
                 largest_contour = max(contours, key=cv2.contourArea)
-                if cv2.contourArea(largest_contour) > 100:  # Minimum area threshold
+                if cv2.contourArea(largest_contour) > 500:  # Increased area threshold
                     x, y, w, h = cv2.boundingRect(largest_contour)
                     subject_areas[subject] = (x, y, w, h)
+                    logger.info(f"Detected {subject} area via color: {x},{y},{w},{h}")
+        
+        # Fallback to contour-based detection if color detection fails
+        if not subject_areas:
+            logger.warning("Color-based detection failed, attempting contour-based detection")
+            thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                        cv2.THRESH_BINARY_INV, 11, 5)
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Filter large contours (likely subject areas)
+            valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 1000]
+            valid_contours = sorted(valid_contours, key=cv2.contourArea, reverse=True)[:2]  # Assume up to 2 subjects
+            
+            for i, cnt in enumerate(valid_contours):
+                x, y, w, h = cv2.boundingRect(cnt)
+                subject_areas[f"subject{i+1}"] = (x, y, w, h)
+                logger.info(f"Detected subject{i+1} area via contours: {x},{y},{w},{h}")
         
         return subject_areas if subject_areas else None
     
@@ -193,7 +218,6 @@ def submit_key():
         subject_code = data.get("subject_code", "").strip()
         answers = data.get("answers", [])
         
-        # Removed validation for subject and subject_code
         # Use default values if missing
         subject = subject or "Unknown"
         subject_code = subject_code or "UNK"
@@ -268,7 +292,7 @@ def process_sheet():
         
         if image is None:
             logger.error("Failed to decode image")
-            return jsonify({"error": "Failed to Astro: Failed to decode image"}), 400
+            return jsonify({"error": "Failed to decode image"}), 400
             
         if image.shape[0] < MIN_IMAGE_DIM or image.shape[1] < MIN_IMAGE_DIM:
             logger.warning(f"Image too small: {image.shape}")
@@ -276,21 +300,22 @@ def process_sheet():
             
         # Detect subject areas
         subject_areas = detect_subject_areas(image)
-        if not subject_areas:
-            logger.error("Could not detect subject areas")
-            return jsonify({"error": "Could not detect subject areas on answer sheet"}), 400
-            
-        # Process each subject area
         results = {}
         keys = load_answer_keys()
         
+        # If no subject areas detected, process the entire image
+        if not subject_areas:
+            logger.info("No subject areas detected, processing entire image as single subject")
+            subject_areas = {"default_subject": (0, 0, image.shape[1], image.shape[0])}
+        
+        # Process each subject area (or the entire image)
         for subject_id, area in subject_areas.items():
             answers = detect_answers(image, area)
             if not answers:
                 logger.error(f"Failed to detect answers for {subject_id}")
                 results[subject_id] = {"error": "Failed to detect answers"}
                 continue
-            
+                
             best_match = None
             best_score = 0
             
