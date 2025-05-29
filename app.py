@@ -6,6 +6,12 @@ import pytesseract
 import json
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+import logging
+from datetime import datetime
+
+# Configure logging with timestamp
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Configure Tesseract path for Render
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
@@ -17,6 +23,7 @@ CORS(app)  # Enable CORS for all routes
 ANSWER_KEY_PATH = "answer_keys.json"
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MIN_IMAGE_DIM = 500  # Minimum dimension (width or height) in pixels
 
 # Initialize answer key file if it doesn't exist
 if not os.path.exists(ANSWER_KEY_PATH):
@@ -32,7 +39,7 @@ def load_answer_keys():
         with open(ANSWER_KEY_PATH, "r") as f:
             return json.load(f)
     except (json.JSONDecodeError, IOError) as e:
-        print(f"Error loading answer keys: {str(e)}")
+        logger.error(f"Error loading answer keys: {str(e)}")
         return {}
 
 def save_answer_keys(keys):
@@ -41,7 +48,7 @@ def save_answer_keys(keys):
             json.dump(keys, f)
         return True
     except IOError as e:
-        print(f"Error saving answer keys: {str(e)}")
+        logger.error(f"Error saving answer keys: {str(e)}")
         return False
 
 @app.route('/')
@@ -79,6 +86,7 @@ def submit_key():
         if not save_answer_keys(keys):
             return jsonify({"error": "Failed to save answer keys"}), 500
             
+        logger.info(f"Answer key saved for {subject} at {datetime.now()}")
         return jsonify({
             "message": f"Answer key for {subject} saved successfully",
             "subject": subject,
@@ -86,7 +94,7 @@ def submit_key():
         })
         
     except Exception as e:
-        print(f"Error in submit_key: {str(e)}")
+        logger.error(f"Error in submit_key: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 def detect_answers(image):
@@ -94,12 +102,15 @@ def detect_answers(image):
         if image is None:
             return None
         
-        # Convert to grayscale
+        # Preprocessing: Enhance contrast and apply Gaussian blur
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
         
-        # Adaptive thresholding
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                     cv2.THRESH_BINARY_INV, 11, 2)
+        # Adaptive thresholding with higher sensitivity
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSIAN_C,
+                                     cv2.THRESH_BINARY_INV, 11, 5)
         
         # Find contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -107,7 +118,7 @@ def detect_answers(image):
         bubbles = []
         for cnt in contours:
             (x, y, w, h) = cv2.boundingRect(cnt)
-            if 10 < w < 50 and 10 < h < 50:
+            if 10 < w < 50 and 10 < h < 50:  # Adjusted range for robustness
                 bubbles.append((x, y, w, h))
 
         # Sort bubbles top to bottom, then left to right
@@ -127,7 +138,8 @@ def detect_answers(image):
                 black_pixels = np.sum(bubble_region == 255)
                 fill_ratio = black_pixels / (w * h)
 
-                if fill_ratio > max_black and fill_ratio > 0.3:
+                # Increase threshold to 0.5 to differentiate filled bubbles
+                if fill_ratio > max_black and fill_ratio > 0.5:
                     max_black = fill_ratio
                     selected = options[j]
 
@@ -136,7 +148,7 @@ def detect_answers(image):
         return answers
     
     except Exception as e:
-        print(f"Error in detect_answers: {str(e)}")
+        logger.error(f"Error in detect_answers: {str(e)}")
         return None
 
 @app.route("/process_sheet", methods=["POST"])
@@ -173,6 +185,10 @@ def process_sheet():
         if image is None:
             return jsonify({"error": "Failed to decode image"}), 400
             
+        # Check minimum dimensions
+        if image.shape[0] < MIN_IMAGE_DIM or image.shape[1] < MIN_IMAGE_DIM:
+            return jsonify({"error": f"Image too small. Minimum dimension: {MIN_IMAGE_DIM}px"}), 400
+            
         # Detect answers
         student_answers = detect_answers(image)
         if student_answers is None:
@@ -203,6 +219,7 @@ def process_sheet():
         
         percentage = (score / min_length * 100) if min_length > 0 else 0
         
+        logger.info(f"Processed answer sheet for {subject} at {datetime.now()} with score {score}/{min_length}")
         return jsonify({
             "subject": subject,
             "score": score,
@@ -214,8 +231,12 @@ def process_sheet():
         })
         
     except Exception as e:
-        print(f"Error in process_sheet: {str(e)}")
+        logger.error(f"Error in process_sheet: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "healthy", "time": datetime.now().isoformat()}), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
