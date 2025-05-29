@@ -23,7 +23,7 @@ CORS(app)  # Enable CORS for all routes
 ANSWER_KEY_PATH = "answer_keys.json"
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-MIN_IMAGE_DIM = 500  # Minimum dimension (width or height) in pixels
+MIN_IMAGE_DIM = 200  # Reduced from 500 to 200 to accommodate narrow answer sheet
 
 # Initialize answer key file if it doesn't exist
 if not os.path.exists(ANSWER_KEY_PATH):
@@ -109,7 +109,7 @@ def detect_answers(image):
         gray = clahe.apply(gray)
         
         # Adaptive thresholding with higher sensitivity
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSIAN_C,
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY_INV, 11, 5)
         
         # Find contours
@@ -138,7 +138,7 @@ def detect_answers(image):
                 black_pixels = np.sum(bubble_region == 255)
                 fill_ratio = black_pixels / (w * h)
 
-                # Increase threshold to 0.5 to differentiate filled bubbles
+                # Threshold to differentiate filled bubbles
                 if fill_ratio > max_black and fill_ratio > 0.5:
                     max_black = fill_ratio
                     selected = options[j]
@@ -186,7 +186,8 @@ def process_sheet():
             return jsonify({"error": "Failed to decode image"}), 400
             
         # Check minimum dimensions
-        if image.shape[0] < MIN_IMAGE_DIM or image.shape[1] < MIN_IMAGE_DIM:
+        height, width = image.shape[:2]
+        if width < MIN_IMAGE_DIM or height < MIN_IMAGE_DIM:
             return jsonify({"error": f"Image too small. Minimum dimension: {MIN_IMAGE_DIM}px"}), 400
             
         # Detect answers
