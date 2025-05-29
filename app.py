@@ -9,31 +9,30 @@ from werkzeug.utils import secure_filename
 import logging
 from datetime import datetime
 
-# Configure logging with timestamp
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Configure Tesseract path for Render
+# Configure Tesseract
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
 # Configuration
 ANSWER_KEY_PATH = "answer_keys.json"
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-MIN_IMAGE_DIM = 500  # Minimum dimension for reliable processing
-MIN_QUESTIONS = 40  # Minimum expected questions
+MIN_IMAGE_DIM = 500
+MIN_QUESTIONS_PER_SUBJECT = 40
 
-# Initialize answer key file if it doesn't exist
+# Initialize answer key file
 if not os.path.exists(ANSWER_KEY_PATH):
     with open(ANSWER_KEY_PATH, "w") as f:
         json.dump({}, f)
 
 def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def load_answer_keys():
     try:
@@ -52,57 +51,54 @@ def save_answer_keys(keys):
         logger.error(f"Error saving answer keys: {str(e)}")
         return False
 
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route("/submit_key", methods=["POST"])
-def submit_key():
+def detect_subject_areas(image):
+    """Detect subject areas using color detection"""
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No JSON data received"}), 400
+        # Convert to HSV color space
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Define color ranges for subject areas (example values - adjust based on actual colors)
+        color_ranges = {
+            'subject1': {
+                'lower': np.array([0, 100, 100]),  # Red range
+                'upper': np.array([10, 255, 255])
+            },
+            'subject2': {
+                'lower': np.array([100, 100, 100]),  # Blue range
+                'upper': np.array([140, 255, 255])
+            }
+        }
+        
+        subject_areas = {}
+        
+        for subject, colors in color_ranges.items():
+            # Create mask for the color
+            mask = cv2.inRange(hsv, colors['lower'], colors['upper'])
             
-        subject = data.get("subject", "").strip()
-        answers = data.get("answers", [])
-        
-        if not subject:
-            return jsonify({"error": "Subject is required"}), 400
-        
-        if not isinstance(answers, list) or len(answers) < MIN_QUESTIONS:
-            return jsonify({"error": f"Answers must be an array of at least {MIN_QUESTIONS} strings"}), 400
-        
-        # Validate each answer is A-D or empty
-        valid_answers = []
-        for i, a in enumerate(answers):
-            a_clean = a.strip().upper() if isinstance(a, str) else ""
-            if a_clean in ['A', 'B', 'C', 'D', '']:
-                valid_answers.append(a_clean if a_clean else "N/A")
-            else:
-                return jsonify({"error": f"Invalid answer at position {i+1}: {a}. Must be A, B, C, or D"}), 400
-        
-        keys = load_answer_keys()
-        keys[subject] = valid_answers
-        
-        if not save_answer_keys(keys):
-            return jsonify({"error": "Failed to save answer keys"}), 500
+            # Find contours
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-        logger.info(f"Answer key saved for {subject} with {len(valid_answers)} questions at {datetime.now()}")
-        return jsonify({
-            "message": f"Answer key for {subject} saved successfully",
-            "subject": subject,
-            "answers": valid_answers,
-            "total_questions": len(valid_answers)
-        })
+            if contours:
+                # Get the largest contour (main subject area)
+                largest_contour = max(contours, key=cv2.contourArea)
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                subject_areas[subject] = (x, y, w, h)
         
+        return subject_areas
+    
     except Exception as e:
-        logger.error(f"Error in submit_key: {str(e)}")
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
+        logger.error(f"Error in detect_subject_areas: {str(e)}")
+        return None
 
-def detect_answers(image):
+def detect_answers(image, subject_area=None):
     try:
         if image is None:
             return None
+            
+        # If subject area is specified, crop the image
+        if subject_area:
+            x, y, w, h = subject_area
+            image = image[y:y+h, x:x+w]
         
         # Preprocessing
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -120,37 +116,23 @@ def detect_answers(image):
         bubbles = []
         for cnt in contours:
             (x, y, w, h) = cv2.boundingRect(cnt)
-            # Adjusted bubble size detection for answer sheet format
             if 15 < w < 60 and 15 < h < 60:
                 bubbles.append((x, y, w, h))
 
-        # Sort bubbles: first by x-coordinate (left/right columns), then by y-coordinate (top to bottom)
-        bubbles = sorted(bubbles, key=lambda b: (b[0], b[1]))
+        # Sort bubbles
+        bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))  # Top to bottom, then left to right
         
-        # Split into left and right columns
-        if len(bubbles) > 0:
-            mid_x = image.shape[1] // 2
-            left_bubbles = [b for b in bubbles if b[0] < mid_x]
-            right_bubbles = [b for b in bubbles if b[0] >= mid_x]
-            
-            # Combine left then right column
-            sorted_bubbles = left_bubbles + right_bubbles
-        else:
-            sorted_bubbles = bubbles
-
         answers = []
         options = ["A", "B", "C", "D"]
 
-        # Process bubbles in groups of 4 (A-D options for each question)
-        for i in range(0, len(sorted_bubbles), 4):
-            group = sorted_bubbles[i:i+4]
-            # If we don't have 4 bubbles, skip this question
+        # Process in groups of 4 (A-D options)
+        for i in range(0, len(bubbles), 4):
+            group = bubbles[i:i+4]
             if len(group) < 4:
                 answers.append("N/A")
                 continue
                 
-            # Sort the group left to right to get A,B,C,D order
-            group = sorted(group, key=lambda b: b[0])
+            group = sorted(group, key=lambda b: b[0])  # Sort left to right
             
             max_black = 0
             selected = None
@@ -172,19 +154,68 @@ def detect_answers(image):
         logger.error(f"Error in detect_answers: {str(e)}")
         return None
 
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route("/submit_key", methods=["POST"])
+def submit_key():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data received"}), 400
+            
+        subject = data.get("subject", "").strip()
+        answers = data.get("answers", [])
+        subject_code = data.get("subject_code", "").strip()
+        
+        if not subject or not subject_code:
+            return jsonify({"error": "Subject name and code are required"}), 400
+        
+        if not isinstance(answers, list) or len(answers) < MIN_QUESTIONS_PER_SUBJECT:
+            return jsonify({"error": f"Answers must be an array of at least {MIN_QUESTIONS_PER_SUBJECT} strings"}), 400
+        
+        # Validate answers
+        valid_answers = []
+        for i, a in enumerate(answers):
+            a_clean = a.strip().upper() if isinstance(a, str) else ""
+            if a_clean in ['A', 'B', 'C', 'D', '']:
+                valid_answers.append(a_clean if a_clean else "N/A")
+            else:
+                return jsonify({"error": f"Invalid answer at position {i+1}: {a}. Must be A, B, C, or D"}), 400
+        
+        keys = load_answer_keys()
+        key_id = f"{subject_code}_{subject}"  # Use code + name as unique identifier
+        keys[key_id] = {
+            "subject": subject,
+            "code": subject_code,
+            "answers": valid_answers
+        }
+        
+        if not save_answer_keys(keys):
+            return jsonify({"error": "Failed to save answer keys"}), 500
+            
+        logger.info(f"Answer key saved for {subject} ({subject_code}) with {len(valid_answers)} questions")
+        return jsonify({
+            "message": f"Answer key for {subject} saved successfully",
+            "subject": subject,
+            "code": subject_code,
+            "total_questions": len(valid_answers),
+            "answers": valid_answers
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in submit_key: {str(e)}")
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
 @app.route("/process_sheet", methods=["POST"])
 def process_sheet():
     try:
-        # Check file in request
         if 'file' not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
             
         file = request.files['file']
-        subject = request.form.get("subject", "").strip()
         
-        if not subject:
-            return jsonify({"error": "Subject is required"}), 400
-            
         if file.filename == '':
             return jsonify({"error": "No selected file"}), 400
             
@@ -206,60 +237,84 @@ def process_sheet():
         if image is None:
             return jsonify({"error": "Failed to decode image"}), 400
             
-        # Check minimum dimensions
-        height, width = image.shape[:2]
-        if width < MIN_IMAGE_DIM or height < MIN_IMAGE_DIM:
+        if image.shape[0] < MIN_IMAGE_DIM or image.shape[1] < MIN_IMAGE_DIM:
             return jsonify({"error": f"Image too small. Minimum dimension: {MIN_IMAGE_DIM}px"}), 400
             
-        # Detect answers
-        student_answers = detect_answers(image)
-        if student_answers is None:
-            return jsonify({"error": "Failed to process answer sheet"}), 500
+        # Detect subject areas
+        subject_areas = detect_subject_areas(image)
+        if not subject_areas:
+            return jsonify({"error": "Could not detect subject areas on answer sheet"}), 400
             
-        # Get answer key
+        # Process each subject area
+        results = {}
         keys = load_answer_keys()
-        if subject not in keys:
-            return jsonify({"error": f"No answer key found for {subject}"}), 404
+        
+        for subject_id, area in subject_areas.items():
+            # Detect answers for this subject area
+            answers = detect_answers(image, area)
+            if not answers:
+                results[subject_id] = {"error": "Failed to detect answers"}
+                continue
             
-        correct_answers = keys[subject]
-        total_questions = len(correct_answers)
-        
-        # Ensure student answers match the number of questions
-        if len(student_answers) < total_questions:
-            student_answers += ["N/A"] * (total_questions - len(student_answers))
-        elif len(student_answers) > total_questions:
-            student_answers = student_answers[:total_questions]
-        
-        # Calculate score
-        score = 0
-        detailed_results = []
-        
-        for i in range(total_questions):
-            if i >= len(student_answers):
-                break
+            # Try to match with answer keys
+            best_match = None
+            best_score = 0
+            
+            for key_id, key_data in keys.items():
+                correct_answers = key_data['answers']
+                match_count = 0
                 
-            is_correct = student_answers[i] == correct_answers[i]
-            if is_correct:
-                score += 1
-            detailed_results.append({
-                "question": i+1,
-                "student_answer": student_answers[i],
-                "correct_answer": correct_answers[i],
-                "is_correct": is_correct
-            })
+                for i in range(min(len(answers), len(correct_answers))):
+                    if answers[i] == correct_answers[i]:
+                        match_count += 1
+                
+                # Calculate match percentage
+                match_percentage = (match_count / len(correct_answers)) * 100
+                
+                if match_percentage > best_score:
+                    best_score = match_percentage
+                    best_match = key_data
+            
+            if best_match:
+                # Calculate detailed results
+                correct_answers = best_match['answers']
+                total_questions = len(correct_answers)
+                score = 0
+                detailed = []
+                
+                for i in range(total_questions):
+                    if i >= len(answers):
+                        break
+                        
+                    is_correct = answers[i] == correct_answers[i]
+                    if is_correct:
+                        score += 1
+                    detailed.append({
+                        "question": i+1,
+                        "student_answer": answers[i],
+                        "correct_answer": correct_answers[i],
+                        "is_correct": is_correct
+                    })
+                
+                percentage = (score / total_questions) * 100 if total_questions > 0 else 0
+                
+                results[subject_id] = {
+                    "subject": best_match['subject'],
+                    "code": best_match['code'],
+                    "score": score,
+                    "total": total_questions,
+                    "percentage": round(percentage, 2),
+                    "detailed_results": detailed,
+                    "student_answers": answers[:total_questions],
+                    "correct_answers": correct_answers
+                }
+            else:
+                results[subject_id] = {
+                    "error": "No matching answer key found",
+                    "detected_answers": answers
+                }
         
-        percentage = (score / total_questions) * 100 if total_questions > 0 else 0
-        
-        logger.info(f"Processed answer sheet for {subject} with {total_questions} questions at {datetime.now()} - Score: {score}/{total_questions}")
-        return jsonify({
-            "subject": subject,
-            "score": score,
-            "total": total_questions,
-            "percentage": round(percentage, 2),
-            "detailed_results": detailed_results,
-            "student_answers": student_answers,
-            "correct_answers": correct_answers
-        })
+        return jsonify(results)
         
     except Exception as e:
         logger.error(f"Error in process_sheet: {str(e)}")
@@ -267,7 +322,7 @@ def process_sheet():
 
 @app.route('/health')
 def health_check():
-    return jsonify({"status": "healthy", "time": datetime.now().isoformat()}), 200
+    return jsonify({"status": "healthy"}), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
