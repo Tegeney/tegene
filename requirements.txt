@@ -1,0 +1,8 @@
+Flask==2.3.2
+Flask-Cors==3.0.10
+opencv-python-headless==4.7.0.72  # Use headless version for cloud
+numpy==1.24.3
+pytesseract==0.3.10
+Pillow==9.5.0
+gunicorn==20.1.0  # Production server
+python-dotenv==1.0.0  # For environment variables
