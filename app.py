@@ -23,7 +23,8 @@ CORS(app)  # Enable CORS for all routes
 ANSWER_KEY_PATH = "answer_keys.json"
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-MIN_IMAGE_DIM = 200  # Reduced from 500 to 200 to accommodate narrow answer sheet
+MIN_IMAGE_DIM = 500  # Minimum dimension for reliable processing
+TOTAL_QUESTIONS = 60  # For 60-question answer sheets
 
 # Initialize answer key file if it doesn't exist
 if not os.path.exists(ANSWER_KEY_PATH):
@@ -68,17 +69,17 @@ def submit_key():
         if not subject:
             return jsonify({"error": "Subject is required"}), 400
         
-        if not isinstance(answers, list) or not all(isinstance(a, str) for a in answers):
-            return jsonify({"error": "Answers must be an array of strings"}), 400
+        if not isinstance(answers, list) or len(answers) != TOTAL_QUESTIONS:
+            return jsonify({"error": f"Answers must be an array of {TOTAL_QUESTIONS} strings"}), 400
         
-        # Validate each answer is A-D
+        # Validate each answer is A-D or empty
         valid_answers = []
-        for a in answers:
-            a_clean = a.strip().upper()
-            if a_clean in ['A', 'B', 'C', 'D']:
-                valid_answers.append(a_clean)
+        for i, a in enumerate(answers):
+            a_clean = a.strip().upper() if isinstance(a, str) else ""
+            if a_clean in ['A', 'B', 'C', 'D', '']:
+                valid_answers.append(a_clean if a_clean else "N/A")
             else:
-                return jsonify({"error": f"Invalid answer: {a}. Must be A, B, C, or D"}), 400
+                return jsonify({"error": f"Invalid answer at position {i+1}: {a}. Must be A, B, C, or D"}), 400
         
         keys = load_answer_keys()
         keys[subject] = valid_answers
@@ -102,13 +103,13 @@ def detect_answers(image):
         if image is None:
             return None
         
-        # Preprocessing: Enhance contrast and apply Gaussian blur
+        # Preprocessing
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
         
-        # Adaptive thresholding with higher sensitivity
+        # Thresholding
         thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY_INV, 11, 5)
         
@@ -118,18 +119,38 @@ def detect_answers(image):
         bubbles = []
         for cnt in contours:
             (x, y, w, h) = cv2.boundingRect(cnt)
-            if 10 < w < 50 and 10 < h < 50:  # Adjusted range for robustness
+            # Adjusted bubble size detection for answer sheet format
+            if 15 < w < 60 and 15 < h < 60:
                 bubbles.append((x, y, w, h))
 
-        # Sort bubbles top to bottom, then left to right
-        bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))
+        # Sort bubbles: first by x-coordinate (left/right columns), then by y-coordinate (top to bottom)
+        bubbles = sorted(bubbles, key=lambda b: (b[0], b[1]))
         
+        # Split into left and right columns
+        if len(bubbles) > 0:
+            mid_x = image.shape[1] // 2
+            left_bubbles = [b for b in bubbles if b[0] < mid_x]
+            right_bubbles = [b for b in bubbles if b[0] >= mid_x]
+            
+            # Combine left then right column
+            sorted_bubbles = left_bubbles + right_bubbles
+        else:
+            sorted_bubbles = bubbles
+
         answers = []
         options = ["A", "B", "C", "D"]
 
-        # Process bubbles in groups of 4
-        for i in range(0, len(bubbles), 4):
-            group = sorted(bubbles[i:i+4], key=lambda b: b[0])
+        # Process bubbles in groups of 4 (A-D options for each question)
+        for i in range(0, len(sorted_bubbles), 4):
+            group = sorted_bubbles[i:i+4]
+            # If we don't have 4 bubbles, skip this question
+            if len(group) < 4:
+                answers.append("N/A")
+                continue
+                
+            # Sort the group left to right to get A,B,C,D order
+            group = sorted(group, key=lambda b: b[0])
+            
             max_black = 0
             selected = None
 
@@ -138,12 +159,17 @@ def detect_answers(image):
                 black_pixels = np.sum(bubble_region == 255)
                 fill_ratio = black_pixels / (w * h)
 
-                # Threshold to differentiate filled bubbles
                 if fill_ratio > max_black and fill_ratio > 0.5:
                     max_black = fill_ratio
                     selected = options[j]
 
             answers.append(selected if selected else "N/A")
+
+        # Ensure we return exactly 60 answers
+        if len(answers) < TOTAL_QUESTIONS:
+            answers += ["N/A"] * (TOTAL_QUESTIONS - len(answers))
+        elif len(answers) > TOTAL_QUESTIONS:
+            answers = answers[:TOTAL_QUESTIONS]
 
         return answers
     
@@ -201,13 +227,15 @@ def process_sheet():
             return jsonify({"error": f"No answer key found for {subject}"}), 404
             
         correct_answers = keys[subject]
-        min_length = min(len(student_answers), len(correct_answers))
         
         # Calculate score
         score = 0
         detailed_results = []
         
-        for i in range(min_length):
+        for i in range(TOTAL_QUESTIONS):
+            if i >= len(student_answers) or i >= len(correct_answers):
+                break
+                
             is_correct = student_answers[i] == correct_answers[i]
             if is_correct:
                 score += 1
@@ -218,17 +246,17 @@ def process_sheet():
                 "is_correct": is_correct
             })
         
-        percentage = (score / min_length * 100) if min_length > 0 else 0
+        percentage = (score / TOTAL_QUESTIONS) * 100
         
-        logger.info(f"Processed answer sheet for {subject} at {datetime.now()} with score {score}/{min_length}")
+        logger.info(f"Processed answer sheet for {subject} at {datetime.now()} with score {score}/{TOTAL_QUESTIONS}")
         return jsonify({
             "subject": subject,
             "score": score,
-            "total": min_length,
+            "total": TOTAL_QUESTIONS,
             "percentage": round(percentage, 2),
             "detailed_results": detailed_results,
             "student_answers": student_answers,
-            "correct_answers": correct_answers
+            "correct_answers": correct_answers[:TOTAL_QUESTIONS]  # Ensure we only return 60
         })
         
     except Exception as e:
