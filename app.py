@@ -106,38 +106,47 @@ def detect_answers(image):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Adaptive thresholding to handle varying lighting
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                     cv2.THRESH_BINARY_INV, 11, 2)
+        # Use Otsu's thresholding for better bubble detection
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
         # Remove table lines
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
         clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
         clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
         
         # Find contours
         contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Filter and sort bubbles
+        # Filter and sort bubbles with precise parameters
         bubbles = []
         for cnt in contours:
             (x, y, w, h) = cv2.boundingRect(cnt)
+            area = w * h
             aspect_ratio = w / float(h)
-            if 15 < w < 50 and 15 < h < 50 and 0.8 < aspect_ratio < 1.2:
+            
+            # Adjusted bubble detection parameters
+            if (25 < w < 60 and 25 < h < 60 and 
+                0.8 < aspect_ratio < 1.2 and 
+                500 < area < 3000):
                 bubbles.append((x, y, w, h))
         
-        # Sort bubbles by row (y) then column (x)
+        # Sort bubbles by vertical position first, then horizontal
         bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))
         
-        # Group into rows (assuming 8 bubbles per row - 4 options x 2 questions)
+        # Improved row grouping with dynamic threshold
         rows = []
         current_row = []
-        last_y = bubbles[0][1] if bubbles else 0
+        y_threshold = 20  # Maximum vertical distance to consider same row
+        
+        if not bubbles:
+            return None
+            
+        last_y = bubbles[0][1]
         
         for bubble in bubbles:
             x, y, w, h = bubble
-            if abs(y - last_y) > 20:  # New row
+            if abs(y - last_y) > y_threshold:
                 if current_row:
                     rows.append(sorted(current_row, key=lambda b: b[0]))
                     current_row = []
@@ -152,30 +161,40 @@ def detect_answers(image):
         options = ["A", "B", "C", "D"]
         
         for row in rows:
-            # Split into left and right columns (4 bubbles each)
-            left_options = row[:4]
-            right_options = row[4:8] if len(row) >= 8 else []
-            
-            # Process left question
-            if left_options:
+            # Split into left and right columns
+            if len(row) >= 8:  # Full row with two questions
+                left_options = sorted(row[:4], key=lambda b: b[0])
+                right_options = sorted(row[4:8], key=lambda b: b[0])
+                
+                # Process left question
                 max_fill = 0
                 selected = None
                 for i, (x, y, w, h) in enumerate(left_options):
                     bubble_region = clean[y:y+h, x:x+w]
                     fill_ratio = np.sum(bubble_region == 255) / (w * h)
-                    if fill_ratio > max_fill and fill_ratio > 0.5:
+                    if fill_ratio > max_fill and fill_ratio > 0.6:  # Higher threshold
                         max_fill = fill_ratio
                         selected = options[i]
                 answers.append(selected if selected else "N/A")
-            
-            # Process right question
-            if right_options:
+                
+                # Process right question
                 max_fill = 0
                 selected = None
                 for i, (x, y, w, h) in enumerate(right_options):
                     bubble_region = clean[y:y+h, x:x+w]
                     fill_ratio = np.sum(bubble_region == 255) / (w * h)
-                    if fill_ratio > max_fill and fill_ratio > 0.5:
+                    if fill_ratio > max_fill and fill_ratio > 0.6:
+                        max_fill = fill_ratio
+                        selected = options[i]
+                answers.append(selected if selected else "N/A")
+            elif len(row) >= 4:  # Handle case where only one column is detected
+                # Assume it's left column if less than 8 bubbles
+                max_fill = 0
+                selected = None
+                for i, (x, y, w, h) in enumerate(sorted(row[:4], key=lambda b: b[0])):
+                    bubble_region = clean[y:y+h, x:x+w]
+                    fill_ratio = np.sum(bubble_region == 255) / (w * h)
+                    if fill_ratio > max_fill and fill_ratio > 0.6:
                         max_fill = fill_ratio
                         selected = options[i]
                 answers.append(selected if selected else "N/A")
