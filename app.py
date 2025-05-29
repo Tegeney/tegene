@@ -34,8 +34,8 @@ CORS(app, resources={r"/*": {"origins": os.getenv("ALLOWED_ORIGINS", "*")}})
 ANSWER_KEY_PATH = os.getenv("ANSWER_KEY_PATH", "answer_keys.json")
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 5 * 1024 * 1024))  # Default 5MB
-MIN_IMAGE_DIM = int(os.getenv("MIN_IMAGE_DIM", 500))
-MIN_QUESTIONS_PER_SUBJECT = int(os.getenv("MIN_QUESTIONS_PER_SUBJECT", 40))
+MIN_IMAGE_DIM = int(os.getenv("MIN_IMAGE_DIM", 400))  # Lowered to 400
+MIN_QUESTIONS_PER_SUBJECT = int(os.getenv("MIN_QUESTIONS_PER_SUBJECT", 30))  # Lowered to 30
 
 # Configure Tesseract
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_PATH", "/usr/bin/tesseract")
@@ -140,7 +140,7 @@ def detect_answers(image: np.ndarray, subject_area: Optional[Tuple[int, int, int
         if subject_area:
             x, y, w, h = subject_area
             if x < 0 or y < 0 or x + w > image.shape[1] or y + h > image.shape[0]:
-                logger.error("Invalid subject area coordinates")
+                logger:error("Invalid subject area coordinates")
                 return None
             image = image[y:y+h, x:x+w]
         
@@ -294,9 +294,10 @@ def process_sheet():
             logger.error("Failed to decode image")
             return jsonify({"error": "Failed to decode image"}), 400
             
-        if image.shape[0] < MIN_IMAGE_DIM or image.shape[1] < MIN_IMAGE_DIM:
-            logger.warning(f"Image too small: {image.shape}")
-            return jsonify({"error": f"Image too small. Minimum dimension: {MIN_IMAGE_DIM}px"}), 400
+        # Relaxed dimension check: at least one dimension must meet MIN_IMAGE_DIM
+        if min(image.shape[0], image.shape[1]) < MIN_IMAGE_DIM:
+            logger.warning(f"Image dimensions too small: {image.shape}")
+            return jsonify({"error": f"Image dimensions too small. At least one dimension must be >= {MIN_IMAGE_DIM}px"}), 400
             
         # Detect subject areas
         subject_areas = detect_subject_areas(image)
@@ -316,11 +317,22 @@ def process_sheet():
                 results[subject_id] = {"error": "Failed to detect answers"}
                 continue
                 
+            # Validate answers is a list of strings
+            if not isinstance(answers, list) or not all(isinstance(a, str) for a in answers):
+                logger.error(f"Invalid answers format for {subject_id}: {answers}")
+                results[subject_id] = {"error": "Invalid answers format detected"}
+                continue
+            
             best_match = None
             best_score = 0
             
             for key_id, key_data in keys.items():
-                correct_answers = key_data['answers']
+                correct_answers = key_data.get('answers', [])
+                # Validate correct_answers is a list of strings
+                if not isinstance(correct_answers, list) or not all(isinstance(a, str) for a in correct_answers):
+                    logger.error(f"Invalid correct_answers format for key {key_id}: {correct_answers}")
+                    continue
+                
                 match_count = sum(1 for i in range(min(len(answers), len(correct_answers))) 
                                 if answers[i] == correct_answers[i])
                 
@@ -331,7 +343,7 @@ def process_sheet():
                     best_match = key_data
             
             if best_match:
-                correct_answers = best_match['answers']
+                correct_answers = best_match.get('answers', [])
                 total_questions = len(correct_answers)
                 score = 0
                 detailed = []
@@ -352,8 +364,8 @@ def process_sheet():
                 percentage = (score / total_questions) * 100 if total_questions > 0 else 0
                 
                 results[subject_id] = {
-                    "subject": best_match['subject'],
-                    "code": best_match['code'],
+                    "subject": best_match.get('subject', 'Unknown'),
+                    "code": best_match.get('code', 'UNK'),
                     "score": score,
                     "total": total_questions,
                     "percentage": round(percentage, 2),
