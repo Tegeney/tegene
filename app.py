@@ -13,26 +13,25 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Configure Tesseract path for Render
+# Configure Tesseract path
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
 # Configuration
 ANSWER_KEY_PATH = "answer_keys.json"
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-MIN_IMAGE_DIM = 200
+MIN_IMAGE_DIM = 500  # Increased minimum dimensions for better processing
 
-# Initialize answer key file if it doesn't exist
+# Initialize answer key file
 if not os.path.exists(ANSWER_KEY_PATH):
     with open(ANSWER_KEY_PATH, "w") as f:
         json.dump({}, f)
 
 def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def load_answer_keys():
     try:
@@ -71,7 +70,6 @@ def submit_key():
         if not isinstance(answers, list) or not all(isinstance(a, str) for a in answers):
             return jsonify({"error": "Answers must be an array of strings"}), 400
         
-        # Validate each answer is A-D
         valid_answers = []
         for a in answers:
             a_clean = a.strip().upper()
@@ -86,7 +84,7 @@ def submit_key():
         if not save_answer_keys(keys):
             return jsonify({"error": "Failed to save answer keys"}), 500
             
-        logger.info(f"Answer key saved for {subject} at {datetime.now()}")
+        logger.info(f"Answer key saved for {subject}")
         return jsonify({
             "message": f"Answer key for {subject} saved successfully",
             "subject": subject,
@@ -97,47 +95,58 @@ def submit_key():
         logger.error(f"Error in submit_key: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
+def process_options(image, options, option_labels):
+    max_fill = 0
+    selected = None
+    for i, (x, y, w, h) in enumerate(options):
+        bubble_region = image[y:y+h, x:x+w]
+        fill_ratio = np.sum(bubble_region == 255) / (w * h)
+        if fill_ratio > max_fill and fill_ratio > 0.55:
+            max_fill = fill_ratio
+            selected = option_labels[i]
+    return selected if selected else "N/A"
+
 def detect_answers(image):
     try:
         if image is None:
             return None
         
-        # Convert to grayscale and enhance contrast
+        # Preprocessing pipeline
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Use Otsu's thresholding for better bubble detection
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # Use adaptive thresholding with optimized parameters
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                     cv2.THRESH_BINARY_INV, 15, 5)
         
-        # Remove table lines
+        # Enhanced table line removal
         horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
         vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
-        clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
-        clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+        clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=3)
+        clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, vertical_kernel, iterations=3)
         
-        # Find contours
-        contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find all contours
+        contours, _ = cv2.findContours(clean, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Filter and sort bubbles with precise parameters
+        # Bubble detection with improved parameters
         bubbles = []
         for cnt in contours:
             (x, y, w, h) = cv2.boundingRect(cnt)
             area = w * h
             aspect_ratio = w / float(h)
             
-            # Adjusted bubble detection parameters
-            if (25 < w < 60 and 25 < h < 60 and 
-                0.8 < aspect_ratio < 1.2 and 
-                500 < area < 3000):
+            if (25 < w < 70 and 25 < h < 70 and 
+                0.7 < aspect_ratio < 1.3 and 
+                400 < area < 3500):
                 bubbles.append((x, y, w, h))
         
-        # Sort bubbles by vertical position first, then horizontal
+        # Sort by position
         bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))
         
-        # Improved row grouping with dynamic threshold
+        # Improved row grouping
         rows = []
         current_row = []
-        y_threshold = 20  # Maximum vertical distance to consider same row
+        y_threshold = 30  # Increased threshold for better row separation
         
         if not bubbles:
             return None
@@ -156,48 +165,19 @@ def detect_answers(image):
         if current_row:
             rows.append(sorted(current_row, key=lambda b: b[0]))
         
-        # Process each row to extract answers
+        # Process each row
         answers = []
         options = ["A", "B", "C", "D"]
         
         for row in rows:
-            # Split into left and right columns
             if len(row) >= 8:  # Full row with two questions
                 left_options = sorted(row[:4], key=lambda b: b[0])
                 right_options = sorted(row[4:8], key=lambda b: b[0])
                 
-                # Process left question
-                max_fill = 0
-                selected = None
-                for i, (x, y, w, h) in enumerate(left_options):
-                    bubble_region = clean[y:y+h, x:x+w]
-                    fill_ratio = np.sum(bubble_region == 255) / (w * h)
-                    if fill_ratio > max_fill and fill_ratio > 0.6:  # Higher threshold
-                        max_fill = fill_ratio
-                        selected = options[i]
-                answers.append(selected if selected else "N/A")
-                
-                # Process right question
-                max_fill = 0
-                selected = None
-                for i, (x, y, w, h) in enumerate(right_options):
-                    bubble_region = clean[y:y+h, x:x+w]
-                    fill_ratio = np.sum(bubble_region == 255) / (w * h)
-                    if fill_ratio > max_fill and fill_ratio > 0.6:
-                        max_fill = fill_ratio
-                        selected = options[i]
-                answers.append(selected if selected else "N/A")
-            elif len(row) >= 4:  # Handle case where only one column is detected
-                # Assume it's left column if less than 8 bubbles
-                max_fill = 0
-                selected = None
-                for i, (x, y, w, h) in enumerate(sorted(row[:4], key=lambda b: b[0])):
-                    bubble_region = clean[y:y+h, x:x+w]
-                    fill_ratio = np.sum(bubble_region == 255) / (w * h)
-                    if fill_ratio > max_fill and fill_ratio > 0.6:
-                        max_fill = fill_ratio
-                        selected = options[i]
-                answers.append(selected if selected else "N/A")
+                answers.append(process_options(clean, left_options, options))
+                answers.append(process_options(clean, right_options, options))
+            elif len(row) >= 4:  # Handle partial rows
+                answers.append(process_options(clean, sorted(row[:4], options))
         
         return answers
     
@@ -208,7 +188,6 @@ def detect_answers(image):
 @app.route("/process_sheet", methods=["POST"])
 def process_sheet():
     try:
-        # Check file in request
         if 'file' not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
             
@@ -232,24 +211,22 @@ def process_sheet():
         if file_length > MAX_FILE_SIZE:
             return jsonify({"error": f"File too large. Max size: {MAX_FILE_SIZE/1024/1024}MB"}), 400
         
-        # Read image
+        # Read and validate image
         img_array = np.frombuffer(file.read(), np.uint8)
         image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         
         if image is None:
             return jsonify({"error": "Failed to decode image"}), 400
             
-        # Check minimum dimensions
         height, width = image.shape[:2]
         if width < MIN_IMAGE_DIM or height < MIN_IMAGE_DIM:
             return jsonify({"error": f"Image too small. Minimum dimension: {MIN_IMAGE_DIM}px"}), 400
             
-        # Detect answers
+        # Process answer sheet
         student_answers = detect_answers(image)
         if student_answers is None:
             return jsonify({"error": "Failed to process answer sheet"}), 500
             
-        # Get answer key
         keys = load_answer_keys()
         if subject not in keys:
             return jsonify({"error": f"No answer key found for {subject}"}), 404
@@ -257,7 +234,7 @@ def process_sheet():
         correct_answers = keys[subject]
         min_length = min(len(student_answers), len(correct_answers))
         
-        # Calculate score
+        # Calculate results
         score = 0
         detailed_results = []
         
@@ -274,7 +251,7 @@ def process_sheet():
         
         percentage = (score / min_length * 100) if min_length > 0 else 0
         
-        logger.info(f"Processed answer sheet for {subject} at {datetime.now()} with score {score}/{min_length}")
+        logger.info(f"Processed sheet for {subject}. Score: {score}/{min_length}")
         return jsonify({
             "subject": subject,
             "score": score,
