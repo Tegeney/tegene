@@ -193,9 +193,10 @@ def submit_key():
         subject_code = data.get("subject_code", "").strip()
         answers = data.get("answers", [])
         
-        if not subject or not subject_code:
-            logger.warning(f"Missing subject or subject_code: subject={subject}, subject_code={subject_code}")
-            return jsonify({"error": "Subject name and code are required"}), 400
+        # Removed validation for subject and subject_code
+        # Use default values if missing
+        subject = subject or "Unknown"
+        subject_code = subject_code or "UNK"
         
         if not isinstance(answers, list) or len(answers) < MIN_QUESTIONS_PER_SUBJECT:
             logger.warning(f"Invalid answers array: length={len(answers)}")
@@ -267,7 +268,7 @@ def process_sheet():
         
         if image is None:
             logger.error("Failed to decode image")
-            return jsonify({"error": "Failed to decode image"}), 400
+            return jsonify({"error": "Failed to Astro: Failed to decode image"}), 400
             
         if image.shape[0] < MIN_IMAGE_DIM or image.shape[1] < MIN_IMAGE_DIM:
             logger.warning(f"Image too small: {image.shape}")
