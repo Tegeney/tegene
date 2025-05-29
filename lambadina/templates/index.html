@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Answer Sheet Grader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="ethiopian-colors"></div>
+        <h1>ፈተና ውጤት አራሚ System</h1>
+        
+        <section>
+            <h2>📘 Submit Answer Key</h2>
+            <form id="keyForm">
+                <label>
+                    Subject:
+                    <input type="text" id="subject" required placeholder="Enter subject name">
+                </label>
+                <label>
+                    Answers (comma-separated, e.g., A,B,C):
+                    <input type="text" id="answers" required placeholder="Enter correct answers">
+                </label>
+                <button type="submit">Submit Key</button>
+            </form>
+        </section>
+
+        <section>
+            <h2>📤 Upload Answer Sheet</h2>
+            <form id="sheetForm" enctype="multipart/form-data">
+                <label>
+                    Subject:
+                    <input type="text" name="subject" required placeholder="Enter subject name">
+                </label>
+                <label>
+                    Image:
+                    <input type="file" name="file" accept=".png,.jpg,.jpeg" required>
+                </label>
+                <button type="submit">Process Sheet</button>
+            </form>
+            <div id="loading" class="loading">
+                <p>Processing your answer sheet, please wait...</p>
+            </div>
+        </section>
+
+        <div id="result" class="result-box"></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
