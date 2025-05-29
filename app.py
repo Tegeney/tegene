@@ -24,7 +24,7 @@ ANSWER_KEY_PATH = "answer_keys.json"
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MIN_IMAGE_DIM = 500  # Minimum dimension for reliable processing
-TOTAL_QUESTIONS = 60  # For 60-question answer sheets
+MIN_QUESTIONS = 40  # Minimum expected questions
 
 # Initialize answer key file if it doesn't exist
 if not os.path.exists(ANSWER_KEY_PATH):
@@ -69,8 +69,8 @@ def submit_key():
         if not subject:
             return jsonify({"error": "Subject is required"}), 400
         
-        if not isinstance(answers, list) or len(answers) != TOTAL_QUESTIONS:
-            return jsonify({"error": f"Answers must be an array of {TOTAL_QUESTIONS} strings"}), 400
+        if not isinstance(answers, list) or len(answers) < MIN_QUESTIONS:
+            return jsonify({"error": f"Answers must be an array of at least {MIN_QUESTIONS} strings"}), 400
         
         # Validate each answer is A-D or empty
         valid_answers = []
@@ -87,11 +87,12 @@ def submit_key():
         if not save_answer_keys(keys):
             return jsonify({"error": "Failed to save answer keys"}), 500
             
-        logger.info(f"Answer key saved for {subject} at {datetime.now()}")
+        logger.info(f"Answer key saved for {subject} with {len(valid_answers)} questions at {datetime.now()}")
         return jsonify({
             "message": f"Answer key for {subject} saved successfully",
             "subject": subject,
-            "answers": valid_answers
+            "answers": valid_answers,
+            "total_questions": len(valid_answers)
         })
         
     except Exception as e:
@@ -165,12 +166,6 @@ def detect_answers(image):
 
             answers.append(selected if selected else "N/A")
 
-        # Ensure we return exactly 60 answers
-        if len(answers) < TOTAL_QUESTIONS:
-            answers += ["N/A"] * (TOTAL_QUESTIONS - len(answers))
-        elif len(answers) > TOTAL_QUESTIONS:
-            answers = answers[:TOTAL_QUESTIONS]
-
         return answers
     
     except Exception as e:
@@ -227,13 +222,20 @@ def process_sheet():
             return jsonify({"error": f"No answer key found for {subject}"}), 404
             
         correct_answers = keys[subject]
+        total_questions = len(correct_answers)
+        
+        # Ensure student answers match the number of questions
+        if len(student_answers) < total_questions:
+            student_answers += ["N/A"] * (total_questions - len(student_answers))
+        elif len(student_answers) > total_questions:
+            student_answers = student_answers[:total_questions]
         
         # Calculate score
         score = 0
         detailed_results = []
         
-        for i in range(TOTAL_QUESTIONS):
-            if i >= len(student_answers) or i >= len(correct_answers):
+        for i in range(total_questions):
+            if i >= len(student_answers):
                 break
                 
             is_correct = student_answers[i] == correct_answers[i]
@@ -246,17 +248,17 @@ def process_sheet():
                 "is_correct": is_correct
             })
         
-        percentage = (score / TOTAL_QUESTIONS) * 100
+        percentage = (score / total_questions) * 100 if total_questions > 0 else 0
         
-        logger.info(f"Processed answer sheet for {subject} at {datetime.now()} with score {score}/{TOTAL_QUESTIONS}")
+        logger.info(f"Processed answer sheet for {subject} with {total_questions} questions at {datetime.now()} - Score: {score}/{total_questions}")
         return jsonify({
             "subject": subject,
             "score": score,
-            "total": TOTAL_QUESTIONS,
+            "total": total_questions,
             "percentage": round(percentage, 2),
             "detailed_results": detailed_results,
             "student_answers": student_answers,
-            "correct_answers": correct_answers[:TOTAL_QUESTIONS]  # Ensure we only return 60
+            "correct_answers": correct_answers
         })
         
     except Exception as e:
