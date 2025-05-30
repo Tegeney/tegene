@@ -1,191 +1,235 @@
 import os
-from flask import Flask, request, jsonify, render_template 
-import cv2 import numpy as np 
-import pytesseract 
-import json from flask_cors 
-import CORS from werkzeug.utils
-import secure_filename 
-import logging from datetime 
-import datetime
+import cv2
+import numpy as np
+import pytesseract
+import json
+import logging
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s') logger = logging.getLogger(name)
+from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
+# Logging configuration
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Tesseract configuration
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
-app = Flask(name) CORS(app)
+# Flask app setup
+app = Flask(__name__)
+CORS(app)
 
-ANSWER_KEY_PATH = "answer_keys.json" ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'} MAX_FILE_SIZE = 5 * 1024 * 1024 MIN_IMAGE_DIM = 500
+# Configs
+ANSWER_KEY_PATH = "answer_keys.json"
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MIN_IMAGE_DIM = 500
 
-if not os.path.exists(ANSWER_KEY_PATH): with open(ANSWER_KEY_PATH, "w") as f: json.dump({}, f)
+# Init answer key file
+if not os.path.exists(ANSWER_KEY_PATH):
+    with open(ANSWER_KEY_PATH, "w") as f:
+        json.dump({}, f)
 
-def allowed_file(filename): return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def load_answer_keys(): try: with open(ANSWER_KEY_PATH, "r") as f: return json.load(f) except (json.JSONDecodeError, IOError) as e: logger.error(f"Error loading answer keys: {str(e)}") return {}
+def load_answer_keys():
+    try:
+        with open(ANSWER_KEY_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading keys: {e}")
+        return {}
 
-def save_answer_keys(keys): try: with open(ANSWER_KEY_PATH, "w") as f: json.dump(keys, f) return True except IOError as e: logger.error(f"Error saving answer keys: {str(e)}") return False
+def save_answer_keys(keys):
+    try:
+        with open(ANSWER_KEY_PATH, "w") as f:
+            json.dump(keys, f)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving keys: {e}")
+        return False
 
-@app.route('/') def index(): return render_template('index.html')
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-@app.route("/submit_key", methods=["POST"]) def submit_key(): try: data = request.get_json() if not data: return jsonify({"error": "No JSON data received"}), 400
+@app.route('/submit_key', methods=['POST'])
+def submit_key():
+    try:
+        data = request.get_json()
+        subject = data.get("subject", "").strip()
+        answers = data.get("answers", [])
 
-subject = data.get("subject", "").strip()
-    answers = data.get("answers", [])
+        if not subject:
+            return jsonify({"error": "Subject is required"}), 400
+        if not isinstance(answers, list) or not all(isinstance(a, str) for a in answers):
+            return jsonify({"error": "Answers must be an array of strings"}), 400
 
-    if not subject:
-        return jsonify({"error": "Subject is required"}), 400
+        valid_answers = []
+        for a in answers:
+            a = a.strip().upper()
+            if a in ["A", "B", "C", "D"]:
+                valid_answers.append(a)
+            else:
+                return jsonify({"error": f"Invalid answer: {a}. Must be A, B, C, or D"}), 400
 
-    if not isinstance(answers, list) or not all(isinstance(a, str) for a in answers):
-        return jsonify({"error": "Answers must be an array of strings"}), 400
+        keys = load_answer_keys()
+        keys[subject] = valid_answers
+        if not save_answer_keys(keys):
+            return jsonify({"error": "Could not save answer key"}), 500
 
-    valid_answers = []
-    for a in answers:
-        a_clean = a.strip().upper()
-        if a_clean in ['A', 'B', 'C', 'D']:
-            valid_answers.append(a_clean)
-        else:
-            return jsonify({"error": f"Invalid answer: {a}. Must be A, B, C, or D"}), 400
+        logger.info(f"Saved key for {subject}")
+        return jsonify({"message": f"Answer key for {subject} saved successfully"}), 200
 
-    keys = load_answer_keys()
-    keys[subject] = valid_answers
+    except Exception as e:
+        logger.error(f"Error in submit_key: {str(e)}")
+        return jsonify({"error": "Server error"}), 500
 
-    if not save_answer_keys(keys):
-        return jsonify({"error": "Failed to save answer keys"}), 500
+def process_options(thresh, options, labels):
+    max_fill = 0
+    selected = None
+    for i, (x, y, w, h) in enumerate(options):
+        roi = thresh[y:y+h, x:x+w]
+        total = cv2.countNonZero(roi)
+        fill_ratio = total / float(w * h)
+        if fill_ratio > 0.4 and fill_ratio > max_fill:
+            max_fill = fill_ratio
+            selected = labels[i]
+    return selected if selected else "N/A"
 
-    logger.info(f"Answer key saved for {subject}")
-    return jsonify({
-        "message": f"Answer key for {subject} saved successfully",
-        "subject": subject,
-        "answers": valid_answers
-    })
+def detect_answers(image):
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 15, 5)
 
-except Exception as e:
-    logger.error(f"Error in submit_key: {str(e)}")
-    return jsonify({"error": f"Server error: {str(e)}"}), 500
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        bubbles = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect = w / float(h)
+            if 25 < w < 70 and 25 < h < 70 and 0.7 < aspect < 1.3:
+                bubbles.append((x, y, w, h))
 
-def process_options(image, options, option_labels): max_fill = 0 selected = None for i, (x, y, w, h) in enumerate(options): bubble = image[y:y+h, x:x+w] total = w * h filled = cv2.countNonZero(bubble) fill_ratio = filled / float(total) logger.debug(f"Option {option_labels[i]} fill ratio: {fill_ratio:.2f}") if fill_ratio > max_fill and fill_ratio > 0.35: max_fill = fill_ratio selected = option_labels[i] return selected if selected else "N/A"
+        if not bubbles:
+            return None
 
-def detect_answers(image): try: gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) blurred = cv2.GaussianBlur(gray, (5, 5), 0) thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 5)
+        # Sort and group into rows
+        bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))
+        rows = []
+        current_row = []
+        y_thresh = 30
+        last_y = bubbles[0][1]
 
-kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        for b in bubbles:
+            if abs(b[1] - last_y) > y_thresh:
+                if current_row:
+                    rows.append(sorted(current_row, key=lambda r: r[0]))
+                    current_row = []
+            current_row.append(b)
+            last_y = b[1]
+        if current_row:
+            rows.append(sorted(current_row, key=lambda r: r[0]))
 
-    contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    bubbles = []
-    for cnt in contours:
-        (x, y, w, h) = cv2.boundingRect(cnt)
-        area = w * h
-        aspect = w / float(h)
-        if (10 < w < 100 and 10 < h < 100 and 0.4 < aspect < 2.0 and 200 < area < 6000):
-            bubbles.append((x, y, w, h))
-
-    bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))
-
-    rows = []
-    current_row = []
-    y_thresh = 25
-    last_y = -100
-
-    for b in bubbles:
-        if abs(b[1] - last_y) > y_thresh and current_row:
-            rows.append(sorted(current_row, key=lambda b: b[0]))
-            current_row = []
-        current_row.append(b)
-        last_y = b[1]
-
-    if current_row:
-        rows.append(sorted(current_row, key=lambda b: b[0]))
-
-    answers = []
-    options = ["A", "B", "C", "D"]
-
-    for row in rows:
-        if len(row) >= 4:
-            chunk = sorted(row[:4], key=lambda b: b[0])
-            answers.append(process_options(thresh, chunk, options))
+        answers = []
+        labels = ['A', 'B', 'C', 'D']
+        for row in rows:
             if len(row) >= 8:
-                chunk2 = sorted(row[4:8], key=lambda b: b[0])
-                answers.append(process_options(thresh, chunk2, options))
+                left = sorted(row[:4], key=lambda r: r[0])
+                right = sorted(row[4:8], key=lambda r: r[0])
+                answers.append(process_options(thresh, left, labels))
+                answers.append(process_options(thresh, right, labels))
+            elif len(row) >= 4:
+                left = sorted(row[:4], key=lambda r: r[0])
+                answers.append(process_options(thresh, left, labels))
 
-    logger.info(f"Detected {len(answers)} answers")
-    return answers
+        return answers
 
-except Exception as e:
-    logger.error(f"Error in detect_answers: {str(e)}")
-    return []
+    except Exception as e:
+        logger.error(f"Error in detect_answers: {str(e)}")
+        return None
 
-@app.route("/process_sheet", methods=["POST"]) def process_sheet(): try: if 'file' not in request.files: return jsonify({"error": "No file uploaded"}), 400
+@app.route("/process_sheet", methods=["POST"])
+def process_sheet():
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        file = request.files['file']
+        subject = request.form.get("subject", "").strip()
 
-file = request.files['file']
-    subject = request.form.get("subject", "").strip()
+        if not subject:
+            return jsonify({"error": "Subject is required"}), 400
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+        if not allowed_file(file.filename):
+            return jsonify({"error": "Invalid file type"}), 400
 
-    if not subject:
-        return jsonify({"error": "Subject is required"}), 400
+        # File size check
+        file.seek(0, os.SEEK_END)
+        if file.tell() > MAX_FILE_SIZE:
+            return jsonify({"error": "File too large"}), 400
+        file.seek(0)
 
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+        npimg = np.frombuffer(file.read(), np.uint8)
+        img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-    if not allowed_file(file.filename):
-        return jsonify({"error": "Invalid file type. Allowed: png, jpg, jpeg"}), 400
+        if img is None:
+            return jsonify({"error": "Invalid image"}), 400
 
-    file.seek(0, os.SEEK_END)
-    file_length = file.tell()
-    file.seek(0)
+        if img.shape[0] < MIN_IMAGE_DIM or img.shape[1] < MIN_IMAGE_DIM:
+            return jsonify({"error": "Image too small"}), 400
 
-    if file_length > MAX_FILE_SIZE:
-        return jsonify({"error": f"File too large. Max size: {MAX_FILE_SIZE/1024/1024}MB"}), 400
+        student_answers = detect_answers(img)
+        if student_answers is None:
+            return jsonify({"error": "Could not detect answers"}), 500
 
-    img_array = np.frombuffer(file.read(), np.uint8)
-    image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        answer_keys = load_answer_keys()
+        if subject not in answer_keys:
+            return jsonify({"error": f"No answer key for subject '{subject}'"}), 404
 
-    if image is None:
-        return jsonify({"error": "Failed to decode image"}), 400
+        correct_answers = answer_keys[subject]
+        min_len = min(len(student_answers), len(correct_answers))
+        score = 0
+        results = []
 
-    h, w = image.shape[:2]
-    if w < MIN_IMAGE_DIM or h < MIN_IMAGE_DIM:
-        return jsonify({"error": f"Image too small. Minimum dimension: {MIN_IMAGE_DIM}px"}), 400
+        for i in range(min_len):
+            correct = correct_answers[i]
+            student = student_answers[i]
+            is_correct = student == correct
+            results.append({
+                "question": i + 1,
+                "student_answer": student,
+                "correct_answer": correct,
+                "is_correct": is_correct
+            })
+            if is_correct:
+                score += 1
 
-    student_answers = detect_answers(image)
-    if not student_answers:
-        return jsonify({"error": "No answers detected"}), 500
+        percent = (score / min_len * 100) if min_len > 0 else 0
 
-    keys = load_answer_keys()
-    if subject not in keys:
-        return jsonify({"error": f"No answer key found for {subject}"}), 404
-
-    correct_answers = keys[subject]
-    min_len = min(len(student_answers), len(correct_answers))
-    score = 0
-    details = []
-
-    for i in range(min_len):
-        correct = student_answers[i] == correct_answers[i]
-        if correct:
-            score += 1
-        details.append({
-            "question": i+1,
-            "student_answer": student_answers[i],
-            "correct_answer": correct_answers[i],
-            "is_correct": correct
+        logger.info(f"{subject}: {score}/{min_len}")
+        return jsonify({
+            "subject": subject,
+            "score": score,
+            "total": min_len,
+            "percentage": round(percent, 2),
+            "detailed_results": results,
+            "student_answers": student_answers,
+            "correct_answers": correct_answers
         })
 
-    percent = (score / min_len * 100) if min_len > 0 else 0
+    except Exception as e:
+        logger.error(f"Error in process_sheet: {str(e)}")
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-    return jsonify({
-        "subject": subject,
-        "score": score,
-        "total": min_len,
-        "percentage": round(percent, 2),
-        "detailed_results": details,
-        "student_answers": student_answers,
-        "correct_answers": correct_answers
-    })
+@app.route('/health')
+def health():
+    return jsonify({"status": "OK", "time": datetime.now().isoformat()}), 200
 
-except Exception as e:
-    logger.error(f"Error in process_sheet: {str(e)}")
-    return jsonify({"error": f"Server error: {str(e)}"}), 500
-
-@app.route('/health') def health_check(): return jsonify({"status": "healthy", "time": datetime.now().isoformat()}), 200
-
-if name == "main": port = int(os.environ.get("PORT", 5000)) app.run(host='0.0.0.0', port=port)
-
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
