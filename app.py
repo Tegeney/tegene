@@ -1,4 +1,12 @@
-import os from flask import Flask, request, jsonify, render_template import cv2 import numpy as np import pytesseract import json from flask_cors import CORS from werkzeug.utils import secure_filename import logging from datetime import datetime
+import os
+from flask import Flask, request, jsonify, render_template 
+import cv2 import numpy as np 
+import pytesseract 
+import json from flask_cors 
+import CORS from werkzeug.utils
+import secure_filename 
+import logging from datetime 
+import datetime
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s') logger = logging.getLogger(name)
 
