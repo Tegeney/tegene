@@ -104,54 +104,59 @@ def detect_answers(image):
     try:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY_INV, 15, 5)
+        thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
-        # Find contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         bubbles = []
+
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
-            aspect = w / float(h)
-            if 25 < w < 70 and 25 < h < 70 and 0.7 < aspect < 1.3:
+            aspect_ratio = w / float(h)
+            area = w * h
+            if 20 < w < 80 and 20 < h < 80 and 0.8 < aspect_ratio < 1.2 and area > 500:
                 bubbles.append((x, y, w, h))
 
-        if not bubbles:
+        if len(bubbles) < 4:
             return None
 
-        # Sort and group into rows
-        bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))
+        bubbles = sorted(bubbles, key=lambda b: (b[1], b[0]))  # sort top to bottom, then left to right
+
         rows = []
         current_row = []
-        y_thresh = 30
         last_y = bubbles[0][1]
 
         for b in bubbles:
-            if abs(b[1] - last_y) > y_thresh:
+            if abs(b[1] - last_y) > 25:
                 if current_row:
                     rows.append(sorted(current_row, key=lambda r: r[0]))
                     current_row = []
             current_row.append(b)
             last_y = b[1]
+
         if current_row:
             rows.append(sorted(current_row, key=lambda r: r[0]))
 
         answers = []
         labels = ['A', 'B', 'C', 'D']
-        for row in rows:
-            if len(row) >= 8:
-                left = sorted(row[:4], key=lambda r: r[0])
-                right = sorted(row[4:8], key=lambda r: r[0])
-                answers.append(process_options(thresh, left, labels))
-                answers.append(process_options(thresh, right, labels))
-            elif len(row) >= 4:
-                left = sorted(row[:4], key=lambda r: r[0])
-                answers.append(process_options(thresh, left, labels))
 
-        return answers
+        for row in rows:
+            if len(row) >= 4:
+                row = sorted(row, key=lambda r: r[0])
+                selected = None
+                max_fill = 0
+                for i, (x, y, w, h) in enumerate(row[:4]):
+                    roi = thresh[y:y+h, x:x+w]
+                    fill = cv2.countNonZero(roi)
+                    fill_ratio = fill / float(w * h)
+                    if fill_ratio > 0.25 and fill_ratio > max_fill:
+                        max_fill = fill_ratio
+                        selected = labels[i]
+                answers.append(selected if selected else "N/A")
+
+        return answers if answers else None
 
     except Exception as e:
-        logger.error(f"Error in detect_answers: {str(e)}")
+        logger.error(f"Detection error: {e}")
         return None
 
 @app.route("/process_sheet", methods=["POST"])
