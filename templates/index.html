@@ -4,7 +4,101 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Answer Sheet Grader</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .ethiopian-colors {
+            height: 10px;
+            background: linear-gradient(to right, #078930, #fcdd09, #da121a);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #078930;
+            text-align: center;
+        }
+        section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+        }
+        h2 {
+            margin-top: 0;
+            color: #da121a;
+        }
+        label {
+            display: block;
+            margin-bottom: 10px;
+        }
+        input[type="text"], input[type="file"] {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #078930;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            cursor: pointer;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #056625;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 10px;
+            background-color: #fcdd09;
+            color: #333;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .result-box {
+            padding: 20px;
+            background-color: #e9f7ef;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        .question-result {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            line-height: 30px;
+            text-align: center;
+            margin: 2px;
+            border-radius: 50%;
+            background-color: #078930;
+            color: white;
+        }
+        .question-result.incorrect {
+            background-color: #da121a;
+        }
+        .question-result.unanswered {
+            background-color: #fcdd09;
+            color: #333;
+        }
+        .summary {
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
@@ -19,8 +113,8 @@
                     <input type="text" id="subject" required placeholder="Enter subject name">
                 </label>
                 <label>
-                    Answers (comma-separated, e.g., A,B,C):
-                    <input type="text" id="answers" required placeholder="Enter correct answers">
+                    Answers (comma-separated, e.g., A,B,C,D,A,... for 60 questions):
+                    <input type="text" id="answers" required placeholder="Enter 60 correct answers separated by commas">
                 </label>
                 <button type="submit">Submit Key</button>
             </form>
@@ -31,11 +125,11 @@
             <form id="sheetForm" enctype="multipart/form-data">
                 <label>
                     Subject:
-                    <input type="text" name="subject" required placeholder="Enter subject name">
+                    <input type="text" name="subject" id="sheetSubject" required placeholder="Enter subject name">
                 </label>
                 <label>
-                    Image:
-                    <input type="file" name="file" accept=".png,.jpg,.jpeg" required>
+                    Answer Sheet Image:
+                    <input type="file" name="file" id="sheetImage" accept=".png,.jpg,.jpeg" required>
                 </label>
                 <button type="submit">Process Sheet</button>
             </form>
@@ -47,6 +141,116 @@
         <div id="result" class="result-box"></div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+    <script>
+        document.getElementById('keyForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const subject = document.getElementById('subject').value;
+            const answers = document.getElementById('answers').value;
+            
+            try {
+                const response = await fetch('/submit_key', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `subject=${encodeURIComponent(subject)}&answers=${encodeURIComponent(answers)}`
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showMessage(`Answer key for ${subject} submitted successfully with ${data.count} answers.`, 'success');
+                } else {
+                    showMessage(`Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showMessage('Failed to submit answer key: ' + error.message, 'error');
+            }
+        });
+
+        document.getElementById('sheetForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const subject = document.getElementById('sheetSubject').value;
+            const fileInput = document.getElementById('sheetImage');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showMessage('Please select an image file', 'error');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('subject', subject);
+            formData.append('file', file);
+            
+            const loading = document.getElementById('loading');
+            const resultDiv = document.getElementById('result');
+            
+            loading.style.display = 'block';
+            resultDiv.innerHTML = '';
+            
+            try {
+                const response = await fetch('/process_sheet', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    displayResults(data);
+                } else {
+                    showMessage(`Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showMessage('Failed to process answer sheet: ' + error.message, 'error');
+            } finally {
+                loading.style.display = 'none';
+            }
+        });
+
+        function showMessage(message, type) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = `<div class="${type}">${message}</div>`;
+        }
+
+        function displayResults(data) {
+            const resultDiv = document.getElementById('result');
+            let html = `
+                <div class="summary">
+                    Subject: ${data.subject}<br>
+                    Score: ${data.score}/${data.total_questions}<br>
+                    Percentage: ${data.percentage}%
+                </div>
+                <div class="question-grid">
+                    <h3>Question Results:</h3>
+            `;
+            
+            // Display all questions
+            for (let q = 1; q <= data.total_questions; q++) {
+                const studentAnswer = data.answers[q];
+                const correctAnswer = data.answer_key[q];
+                const isCorrect = studentAnswer === correctAnswer;
+                
+                let className = 'question-result';
+                if (studentAnswer === null || studentAnswer === undefined) {
+                    className += ' unanswered';
+                } else if (!isCorrect) {
+                    className += ' incorrect';
+                }
+                
+                html += `
+                    <div class="${className}" title="Q${q}: Your answer: ${studentAnswer || 'None'}, Correct: ${correctAnswer}">
+                        ${q}
+                    </div>
+                `;
+            }
+            
+            html += `</div>`;
+            resultDiv.innerHTML = html;
+        }
+    </script>
 </body>
 </html>
